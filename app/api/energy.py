@@ -10,7 +10,7 @@ from os import getenv
 
 logger = logging.getLogger(__name__)
 
-SOLAREDGE_SITE_ID = getenv("SOLAREDGE_SITE_ID", "202106")
+SOLAREDGE_SITE_ID = getenv("SOLAREDGE_SITE_ID", "")
 SOLAREDGE_API_KEY = getenv("SOLAREDGE_API_KEY", "")
 SOLAREDGE_DAILY_API = "https://monitoringapi.solaredge.com/site/{}/energyDetails.json"
 
