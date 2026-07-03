@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import asyncio
 import httpx
 from app.database import init_db, SessionLocal
 from app.models import Telemetry
 from app.api.energy import router as energy_router
 from app.api.backup_restore import router as backup_router
+from app.api.dashboard import router as dashboard_router
 from os import getenv
 from datetime import datetime
 import logging
@@ -13,9 +15,13 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="P1 Energy Monitor v3")
+app = FastAPI(title="P1 Energy Monitor v4")
 app.include_router(energy_router)
 app.include_router(backup_router)
+app.include_router(dashboard_router)
+
+# Serve the split-out CSS/JS files (see /static/*.js, /static/style.css)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 P1_IP = getenv("P1_IP", "")
 P1_API = f"http://{P1_IP}/api/v1/data" if P1_IP else ""
@@ -95,12 +101,12 @@ async def collect_data():
                 response = await client.get(P1_API)
                 if response.status_code == 200:
                     p1_data = response.json()
-                    
+
                     # Get solar data every 4 cycles (15s * 4 = 60s)
                     # Cache it between API calls to avoid losing data
                     if solar_counter % 4 == 0:
                         last_solar_w = await get_solar_power()
-                    
+
                     db = SessionLocal()
                     telemetry = Telemetry(
                         timestamp=datetime.now(),
@@ -113,15 +119,22 @@ async def collect_data():
                     db.add(telemetry)
                     db.commit()
                     db.close()
-                    
+
                     solar_counter += 1
         except Exception as e:
             logger.error(f"Collection error: {type(e).__name__}: {e}")
             import traceback
             logger.error(traceback.format_exc())
-        
+
         await asyncio.sleep(15)
 
 @app.get("/")
 async def root():
-    return FileResponse("index.html")
+    # Force browsers to always revalidate index.html instead of reusing a
+    # stale cached copy across reloads. Safari in particular is much more
+    # aggressive than Chrome about caching the HTML document itself, which
+    # can silently serve old <script> tags after a redeploy.
+    return FileResponse(
+        "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+    )
