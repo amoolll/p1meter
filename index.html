@@ -1554,41 +1554,78 @@ function toggleFilter() {
     saveUIState();
 }
 
+// Shared helper — updates all 4 top cards from a `daily` object.
+// Used by both loadChartData (date picker) and loadDashboard (live 10s poll)
+// so the cards and chart can never drift out of sync with each other.
+function updateAllCards(daily) {
+    const impKwh = daily.import_kwh || 0;
+    const expKwh = daily.export_kwh || 0;
+    const netKwh = expKwh - impKwh;
+
+    const cardTotal = document.getElementById('card-total');
+    const hdrTotal = document.getElementById('hdr-total');
+    const lblNet = document.getElementById('lbl-net-val');
+
+    if (netKwh >= 0) {
+        hdrTotal.textContent = "Total Surplus";
+        cardTotal.className = "card surplus";
+        lblNet.textContent = `+${netKwh.toFixed(2)} kWh`;
+        lblNet.classList.remove('grid');
+        lblNet.classList.add('surplus');
+    } else {
+        hdrTotal.textContent = "Total Grid";
+        cardTotal.className = "card grid";
+        lblNet.textContent = `${netKwh.toFixed(2)} kWh`;
+        lblNet.classList.remove('surplus');
+        lblNet.classList.add('grid');
+    }
+
+    document.getElementById('lbl-today-grid').textContent = `${impKwh.toFixed(2)} kWh`;
+    document.getElementById('lbl-today-surplus').textContent = `${expKwh.toFixed(2)} kWh`;
+    document.getElementById('lbl-gas-val').textContent = `${(daily.gas_m3 || 0).toFixed(3)} m³`;
+    document.getElementById('lbl-gas-yday').textContent = `${((daily.gas_m3 || 0) * 0.88).toFixed(3)} m³`;
+
+    const calculatedSolar = daily.solar_kwh || 0;
+    const selfConsumed = Math.max(0, calculatedSolar - expKwh);
+    const totalHomeUse = selfConsumed + impKwh;
+    const selfSufficiency = totalHomeUse > 0 ? (selfConsumed / totalHomeUse) * 100 : 0;
+
+    document.getElementById('lbl-solar-val').textContent = `${calculatedSolar.toFixed(2)} kWh`;
+
+    const selfSuffPercent = Math.min(selfSufficiency, 100);
+    const selfSuffElement = document.getElementById('lbl-self-suff');
+    selfSuffElement.textContent = `${selfSuffPercent.toFixed(1)} %`;
+    window.lastDailySelfSufficiency = selfSuffPercent;
+
+    selfSuffElement.classList.remove('low', 'medium', 'high');
+    if (selfSuffPercent < 50) {
+        selfSuffElement.classList.add('low');
+    } else if (selfSuffPercent >= 50 && selfSuffPercent < 75) {
+        selfSuffElement.classList.add('medium');
+    } else {
+        selfSuffElement.classList.add('high');
+    }
+
+    const yesterdaySolar = calculatedSolar * 0.88;
+    document.getElementById('lbl-solar-yday').textContent = `${yesterdaySolar.toFixed(2)} kWh`;
+
+    updateCostLabels(daily);
+}
+
 async function loadChartData(dateStr) {
     try {
         const res = await fetch(`${API}/api/energy?date=${dateStr}`);
         const data = await res.json();
-        
+
         const daily = data.daily || {};
-        const current = data.current || {};
         const history = data.history || [];
-        
+
         window.lastDailyMetrics = daily;
         lastHistory = history;
-        
-        // Update cards with the data
-        const impKwh = daily.import_kwh || 0;
-        const expKwh = daily.export_kwh || 0;
-        const netKwh = expKwh - impKwh;
-        
-        const cardTotal = document.getElementById('card-total');
-        const hdrTotal = document.getElementById('hdr-total');
-        const lblNet = document.getElementById('lbl-net-val');
-        
-        if (netKwh >= 0) {
-            hdrTotal.textContent = "Total Surplus";
-            cardTotal.className = "card surplus";
-            lblNet.textContent = `+${netKwh.toFixed(2)} kWh`;
-            lblNet.classList.remove('grid');
-            lblNet.classList.add('surplus');
-        } else {
-            hdrTotal.textContent = "Total Grid";
-            cardTotal.className = "card grid";
-            lblNet.textContent = `${netKwh.toFixed(2)} kWh`;
-            lblNet.classList.remove('surplus');
-            lblNet.classList.add('grid');
-        }
-        
+
+        // Update all 4 top cards for the selected date, not just the total card
+        updateAllCards(daily);
+
         // Render charts with new data
         if (history.length > 0) {
             renderDynamicCharts(history);
@@ -1974,38 +2011,20 @@ async function loadDashboard() {
         document.getElementById('intervalSelect').value = currentFilters.interval;
         
         const todayStr = new Date().toISOString().split('T')[0];
+        // Only clobber the cards/chart with "today" data if the user is
+        // actually viewing today. Otherwise a selected past date would get
+        // silently overwritten every 10s by this live poll.
+        const isViewingToday = currentFilters.date === todayStr;
+
         const res = await fetch(`${API}/api/energy?date=${todayStr}`);
         const data = await res.json();
         
         const daily = data.daily || {};
         const current = data.current || {};
         const history = data.history || [];
-        
-        window.lastDailyMetrics = daily;
-        lastHistory = history;
 
-        const impKwh = daily.import_kwh || 0;
-        const expKwh = daily.export_kwh || 0;
-        const netKwh = expKwh - impKwh;
-        
-        const cardTotal = document.getElementById('card-total');
-        const hdrTotal = document.getElementById('hdr-total');
-        const lblNet = document.getElementById('lbl-net-val');
-        
-        if (netKwh >= 0) {
-            hdrTotal.textContent = "Total Surplus";
-            cardTotal.className = "card surplus";
-            lblNet.textContent = `+${netKwh.toFixed(2)} kWh`;
-            lblNet.classList.remove('grid');
-            lblNet.classList.add('surplus');
-        } else {
-            hdrTotal.textContent = "Total Grid";
-            cardTotal.className = "card grid";
-            lblNet.textContent = `${netKwh.toFixed(2)} kWh`;
-            lblNet.classList.remove('surplus');
-            lblNet.classList.add('grid');
-        }
-
+        // Live power status (tab title + header) is always "now" — keep
+        // this unconditional regardless of which date is selected.
         const powerW = current.grid_power_w || 0;
         const liveStatus = document.getElementById('liveStatus');
         
@@ -2024,50 +2043,12 @@ async function loadDashboard() {
             liveStatus.className = 'grid';
         }
 
-        document.getElementById('lbl-today-grid').textContent = `${impKwh.toFixed(2)} kWh`;
-        document.getElementById('lbl-today-surplus').textContent = `${expKwh.toFixed(2)} kWh`;
-        document.getElementById('lbl-gas-val').textContent = `${(daily.gas_m3 || 0).toFixed(3)} m³`;
-        document.getElementById('lbl-gas-yday').textContent = `${((daily.gas_m3 || 0) * 0.88).toFixed(3)} m³`;
+        if (!isViewingToday) return;
 
-        // Solar from real SolarEdge API
-        const calculatedSolar = daily.solar_kwh || 0;
-        
-        // Self Consumed = Solar that was used at home (not exported)
-        const selfConsumed = Math.max(0, calculatedSolar - expKwh);
-        
-        // Total Home Consumption = Self consumed solar + Grid import
-        const totalHomeUse = selfConsumed + impKwh;
-        
-        // Self Sufficiency = What % of home consumption came from own solar
-        const selfSufficiency = totalHomeUse > 0 ? (selfConsumed / totalHomeUse) * 100 : 0;
-        
-        document.getElementById('lbl-solar-val').textContent = `${calculatedSolar.toFixed(2)} kWh`;
-        
-        // Set self sufficiency with dynamic color
-        const selfSuffPercent = Math.min(selfSufficiency, 100);
-        const selfSuffElement = document.getElementById('lbl-self-suff');
-        selfSuffElement.textContent = `${selfSuffPercent.toFixed(1)} %`;
-        
-        // Store for monthly card use
-        window.lastDailySelfSufficiency = selfSuffPercent;
-        
-        // Remove all color classes
-        selfSuffElement.classList.remove('low', 'medium', 'high');
-        
-        // Add color class based on percentage
-        if (selfSuffPercent < 50) {
-            selfSuffElement.classList.add('low');  // Red
-        } else if (selfSuffPercent >= 50 && selfSuffPercent < 75) {
-            selfSuffElement.classList.add('medium');  // Yellow
-        } else {
-            selfSuffElement.classList.add('high');  // Green
-        }
-        
-        // Yesterday's solar - estimate as 88% of today (seasonal variation)
-        const yesterdaySolar = calculatedSolar * 0.88;
-        document.getElementById('lbl-solar-yday').textContent = `${yesterdaySolar.toFixed(2)} kWh`;
+        window.lastDailyMetrics = daily;
+        lastHistory = history;
 
-        updateCostLabels(daily);
+        updateAllCards(daily);
         if (history.length > 0) renderDynamicCharts(history);
 
     } catch (e) {
