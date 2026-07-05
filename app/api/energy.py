@@ -17,7 +17,7 @@ SOLAREDGE_DAILY_API = "https://monitoringapi.solaredge.com/site/{}/energyDetails
 # Simple in-memory cache: { date_str: (kwh_value, fetched_at_datetime) }
 # Prevents hammering the SolarEdge API when /api/energy is polled frequently.
 _solar_daily_cache = {}
-SOLAR_CACHE_TTL_SECONDS = 900  # 15 minutes for today's (still-accumulating) value
+SOLAR_CACHE_TTL_SECONDS = 180  # 15 minutes for today's (still-accumulating) value
 
 
 async def get_solar_daily_kwh(date_str):

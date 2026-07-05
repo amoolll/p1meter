@@ -33,6 +33,7 @@ services:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       POSTGRES_DB: ${POSTGRES_DB}
+      TZ: Europe/Amsterdam
     depends_on:
       p1-postgres:
         condition: service_healthy
