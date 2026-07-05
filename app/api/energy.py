@@ -14,11 +14,30 @@ SOLAREDGE_SITE_ID = getenv("SOLAREDGE_SITE_ID", "")
 SOLAREDGE_API_KEY = getenv("SOLAREDGE_API_KEY", "")
 SOLAREDGE_DAILY_API = "https://monitoringapi.solaredge.com/site/{}/energyDetails.json"
 
+# Simple in-memory cache: { date_str: (kwh_value, fetched_at_datetime) }
+# Prevents hammering the SolarEdge API when /api/energy is polled frequently.
+_solar_daily_cache = {}
+SOLAR_CACHE_TTL_SECONDS = 900  # 15 minutes for today's (still-accumulating) value
+
+
 async def get_solar_daily_kwh(date_str):
-    """Get daily solar energy from SolarEdge API (e.g., '2026-06-20')"""
+    """Get daily solar energy from SolarEdge API (e.g., '2026-06-20'), cached."""
     if not SOLAREDGE_API_KEY:
         logger.warning("[SOLAREDGE-DAILY] No API key configured")
         return 0
+
+    # Serve from cache if fresh enough. Past dates never change once the day
+    # is over, so they get a longer effective TTL than today's date.
+    cached = _solar_daily_cache.get(date_str)
+    if cached:
+        cached_value, fetched_at = cached
+        age = (datetime.now() - fetched_at).total_seconds()
+        is_today = date_str == datetime.now().strftime("%Y-%m-%d")
+        ttl = SOLAR_CACHE_TTL_SECONDS if is_today else SOLAR_CACHE_TTL_SECONDS * 4
+        if age < ttl:
+            logger.info(f"[SOLAREDGE-DAILY] Cache hit for {date_str} (age={int(age)}s)")
+            return cached_value
+
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             url = SOLAREDGE_DAILY_API.format(SOLAREDGE_SITE_ID)
@@ -33,38 +52,40 @@ async def get_solar_daily_kwh(date_str):
             logger.info(f"[SOLAREDGE-DAILY] Fetching {url} for {date_str}")
             response = await client.get(url, params=params)
             logger.info(f"[SOLAREDGE-DAILY] Response status: {response.status_code}")
-            
+
             if response.status_code == 200:
                 data = response.json()
                 logger.info(f"[SOLAREDGE-DAILY] Response keys: {data.keys()}")
-                
+
                 # Find Production meter
                 meters = data.get("energyDetails", {}).get("meters", [])
                 logger.info(f"[SOLAREDGE-DAILY] Found {len(meters)} meters")
-                
+
                 for i, meter in enumerate(meters):
                     meter_type = meter.get("type")
                     logger.info(f"[SOLAREDGE-DAILY] Meter {i}: type={meter_type}")
-                    
+
                     if meter_type == "Production":
                         values = meter.get("values", [])
                         logger.info(f"[SOLAREDGE-DAILY] Production meter has {len(values)} values")
-                        
+
                         if values and len(values) > 0:
                             wh = values[0].get("value")
                             logger.info(f"[SOLAREDGE-DAILY] Value (Wh): {wh}")
                             if wh:
                                 kwh = float(wh) / 1000.0
                                 logger.info(f"[SOLAREDGE-DAILY] {date_str}: {kwh} kWh ✓")
+                                _solar_daily_cache[date_str] = (kwh, datetime.now())
                                 return kwh
-                
+
                 logger.warning(f"[SOLAREDGE-DAILY] No Production meter found in response")
             else:
                 logger.error(f"[SOLAREDGE-DAILY] API returned {response.status_code}: {response.text}")
     except Exception as e:
         logger.error(f"[SOLAREDGE-DAILY] Error: {e}")
-    
+
     logger.warning(f"[SOLAREDGE-DAILY] Returning 0 for {date_str}")
+    _solar_daily_cache[date_str] = (0, datetime.now())
     return 0
 
 router = APIRouter(prefix="/api", tags=["energy"])
@@ -79,18 +100,18 @@ async def get_energy(date: Optional[str] = Query(None), db: Session = Depends(ge
         # Use current local time, not UTC
         end = datetime.now()
         start = end - timedelta(hours=24)
-    
+
     data = db.query(Telemetry).filter(Telemetry.timestamp >= start, Telemetry.timestamp <= end).order_by(Telemetry.timestamp).all()
-    
+
     if not data:
         return {"history": [], "daily": {"import_kwh": 0, "export_kwh": 0, "gas_m3": 0, "solar_kwh": 0, "self_sufficiency_percent": 0}, "current": {"grid_power_w": 0, "solar_power_w": 0}}
-    
+
     history = [{"time": t.timestamp.strftime("%H:%M"), "import_w": t.grid_power_w if t.grid_power_w > 0 else 0, "export_w": abs(t.grid_power_w) if t.grid_power_w < 0 else 0, "gas_m3": t.gas_m3, "solar_w": t.solar_power_w} for t in data]
-    
+
     first, last = data[0], data[-1]
     import_kwh = max(0, last.total_import_kwh - first.total_import_kwh)
     export_kwh = max(0, last.total_export_kwh - first.total_export_kwh)
-    
+
     # Get solar energy from SolarEdge daily API (more accurate than 15-sec samples)
     solar_kwh = 0
     if date:
@@ -105,23 +126,23 @@ async def get_energy(date: Optional[str] = Query(None), db: Session = Depends(ge
                 if solar_kw > 0:
                     solar_count += 1
                     solar_kwh += solar_kw * (15.0 / 3600.0)
-    
+
     today_start = datetime.combine(datetime.now().date(), time.min)
     today_data = db.query(Telemetry).filter(Telemetry.timestamp >= today_start, Telemetry.timestamp <= datetime.now()).order_by(Telemetry.timestamp).all()
-    
+
     gas_m3 = 0
     if today_data and len(today_data) > 1:
         first_non_zero = next((r for r in today_data if r.gas_m3 > 0), None)
         if first_non_zero:
             gas_m3 = max(0, today_data[-1].gas_m3 - first_non_zero.gas_m3)
-    
+
     # Calculate self sufficiency: (solar - export) / (solar - export + import)
     # self_consumed = solar - export (solar used at home)
     # total_consumption = self_consumed + import
     self_consumed = max(0, solar_kwh - export_kwh)
     total_consumption = self_consumed + import_kwh
     self_sufficiency = (self_consumed / total_consumption * 100) if total_consumption > 0 else 0
-    
+
     return {"history": history, "daily": {"import_kwh": round(import_kwh, 2), "export_kwh": round(export_kwh, 2), "gas_m3": round(gas_m3, 3), "solar_kwh": round(solar_kwh, 2), "self_sufficiency_percent": round(self_sufficiency, 1)}, "current": {"grid_power_w": last.grid_power_w, "solar_power_w": last.solar_power_w}}
 
 @router.get("/tariff")
